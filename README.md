@@ -34,8 +34,9 @@ Control your WLED lights using ESP32 with ultra-low power consumption. Choose be
 2. **Read the documentation** for your chosen version
 3. **Wire components** according to the guide
 4. **Update configuration:**
-   - WLED MAC address (line 37 for touch / line 70 for multi-button)
-   - WiFi channel (line 10 in both)
+   - WLED MAC addresses in the `targets[]` array (multi-button) or `macAddress` (touch)
+   - Button-to-target mapping in `buttonTargets` (multi-button)
+   - WiFi channel (`CHANNEL` in both)
 5. **Upload code** to ESP32 using Arduino IDE
 6. **Test** and enjoy!
 
@@ -115,9 +116,29 @@ Control your WLED lights using ESP32 with ultra-low power consumption. Choose be
 ### Update Code:
 ```cpp
 // Update these lines in the .ino file:
+// Touch version
 const uint8_t macAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // Your WLED MAC
+
+// Multi-button version (multiple targets)
+WLEDTarget targets[] = {
+  {{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01}, "Living Room"},
+  {{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02}, "Kitchen"}
+};
+
+// Map buttons to targets (true = send to that target)
+bool buttonTargets[NUM_BUTTONS][NUM_TARGETS] = {
+  {true, false}, // ON/OFF
+  {true, true},  // Preset 1
+  // ...
+};
+
 #define CHANNEL 1  // Your WiFi channel (1-13)
 ```
+
+### Configure Multiple WLED Targets (Multi-Button)
+- Add each WLED's MAC and a friendly name to the `targets[]` array (up to 4 entries).
+- For every button row in `buttonTargets`, set `true` for each target that should receive the button press.
+- Example: to have Preset 1 control only the Kitchen strip, set its row to `{false, true}`.
 
 ---
 
