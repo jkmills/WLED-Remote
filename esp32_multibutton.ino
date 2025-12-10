@@ -66,16 +66,51 @@ RTC_DATA_ATTR uint32_t seq = 1;
 // Store which button was pressed - stored in RTC memory
 RTC_DATA_ATTR uint8_t lastButtonPressed = 255;
 
-// Modify with the WLED mac address
-// Temporarily using broadcast address for testing
-//const uint8_t macAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+// Configure up to 4 WLED targets. Add or remove entries to match your setup.
+// Example shows 3 targets: Living Room, Kitchen, and Desk. Replace the MAC
+// addresses and names with your own WLED devices.
+struct WLEDTarget {
+  uint8_t mac[6];
+  const char* name;
+};
 
-// Modify with the WLED mac address
-const uint8_t macAddress[] = {0x30, 0xC6, 0xF7, 0x1F, 0xD2, 0xD0};
+WLEDTarget targets[] = {
+  {{0x30, 0xC6, 0xF7, 0x1F, 0xD2, 0xD0}, "Living Room"},
+  {{0x24, 0x6F, 0x28, 0xAA, 0xBB, 0xCC}, "Kitchen"},
+  {{0x24, 0x6F, 0x28, 0xDD, 0xEE, 0xFF}, "Desk"}
+};
+
+const int NUM_TARGETS = sizeof(targets) / sizeof(targets[0]);
+
+// Map each button to one or more WLED targets using a bitmask so changing the
+// number of targets won't cause initializer size errors. Bit 0 controls
+// targets[0], bit 1 controls targets[1], etc. Only the lower NUM_TARGETS bits
+// are used when sending.
+static_assert(NUM_TARGETS <= 8, "Up to 8 WLED targets are supported");
+
+uint8_t buttonTargetMask[NUM_BUTTONS] = {
+  // ON/OFF      Living Room | Kitchen
+  (1 << 0) | (1 << 1),
+  // Preset 1    Living Room | Desk
+  (1 << 0) | (1 << 2),
+  // Preset 2    Kitchen     | Desk
+  (1 << 1) | (1 << 2),
+  // Preset 3    All
+  (1 << 0) | (1 << 1) | (1 << 2),
+  // Preset 4    Living Room only
+  (1 << 0),
+  // Bright Up   All
+  (1 << 0) | (1 << 1) | (1 << 2),
+  // Bright Down All
+  (1 << 0) | (1 << 1) | (1 << 2),
+  // Night Mode  Living Room | Kitchen
+  (1 << 0) | (1 << 1)
+};
 
 int retriesCount = 0;
 
 esp_now_peer_info_t peerInfo;
+uint8_t activeTargetMac[6] = {0};
 
 // Message structure from wled00/remote.cpp
 typedef struct message_structure {
@@ -100,18 +135,22 @@ void sentStatusAndRetries(const wifi_tx_info_t *info, esp_now_send_status_t stat
   Serial.print("Delivery Status: ");
   if (status == ESP_NOW_SEND_SUCCESS) {
     Serial.println("Success");
-  } else {
-    Serial.println("Fail. Retrying");
-
-    if(retriesCount < MAX_RETRIES){
-      esp_now_send(macAddress, (uint8_t *)&message, sizeof(message));
-      retriesCount += 1;
-    }
     retriesCount = 0;
+    return;
   }
+
+  Serial.println("Fail. Retrying");
+
+  if (retriesCount < MAX_RETRIES) {
+    retriesCount += 1;
+    esp_now_send(activeTargetMac, (uint8_t *)&message, sizeof(message));
+    return;
+  }
+
+  retriesCount = 0;
 }
 
-void sendMessage(int button) {
+void sendMessage(int button, int targetIndex) {
   // Increase seq number
   seq += 1;
 
@@ -125,10 +164,13 @@ void sendMessage(int button) {
   Serial.print(seq);
   Serial.print(" | Command: ");
   Serial.println(button);
+  Serial.print("Target: ");
+  Serial.println(targets[targetIndex].name);
 
   message.button = button;
 
-  esp_err_t result = esp_now_send(macAddress, (uint8_t *)&message, sizeof(message));
+  memcpy(activeTargetMac, targets[targetIndex].mac, 6);
+  esp_err_t result = esp_now_send(activeTargetMac, (uint8_t *)&message, sizeof(message));
 
   // Display the error
   switch (result) {
@@ -164,6 +206,23 @@ void sendMessage(int button) {
       Serial.print("Unknown error code: ");
       Serial.println(result);
       break;
+  }
+}
+
+void addPeers() {
+  for (int i = 0; i < NUM_TARGETS; i++) {
+    memset(&peerInfo, 0, sizeof(peerInfo));
+    memcpy(peerInfo.peer_addr, targets[i].mac, 6);
+    peerInfo.channel = CHANNEL;
+    peerInfo.encrypt = false;
+
+    if (esp_now_add_peer(&peerInfo) != ESP_OK){
+      Serial.print("Failed to add peer: ");
+      Serial.println(targets[i].name);
+    } else {
+      Serial.print("Added peer: ");
+      Serial.println(targets[i].name);
+    }
   }
 }
 
@@ -223,15 +282,7 @@ void setup(){
   // Message sending callback function
   esp_now_register_send_cb(sentStatusAndRetries);
 
-  memcpy(peerInfo.peer_addr, macAddress, 6);
-  peerInfo.channel = CHANNEL;
-  peerInfo.encrypt = false;
-
-  // Add peer
-  if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Failed to add peer");
-    return;
-  }
+  addPeers();
 
   Serial.println("ESP-NOW Initialized Successfully");
   Serial.println("\nWaiting for button press...");
@@ -287,8 +338,19 @@ void setup(){
       }
     }
 
-    // Send the message
-    sendMessage(commandToSend);
+    // Send the message to all configured targets
+    bool sentToAny = false;
+    uint8_t targetMask = buttonTargetMask[buttonIndex];
+    for (int i = 0; i < NUM_TARGETS; i++) {
+      if (targetMask & (1 << i)) {
+        sendMessage(commandToSend, i);
+        sentToAny = true;
+      }
+    }
+
+    if (!sentToAny) {
+      Serial.println("No targets configured for this button. Update buttonTargetMask.");
+    }
 
     // Store which button was pressed
     lastButtonPressed = buttonIndex;
@@ -367,8 +429,19 @@ void loop(){
         }
       }
 
-      // Send the message
-      sendMessage(commandToSend);
+      // Send the message to all configured targets
+      bool sentToAny = false;
+      uint8_t targetMask = buttonTargetMask[buttonIndex];
+      for (int i = 0; i < NUM_TARGETS; i++) {
+        if (targetMask & (1 << i)) {
+          sendMessage(commandToSend, i);
+          sentToAny = true;
+        }
+      }
+
+      if (!sentToAny) {
+        Serial.println("No targets configured for this button. Update buttonTargetMask.");
+      }
 
       // Wait for button release
       while (digitalRead(buttons[buttonIndex].pin) == LOW) {
