@@ -125,10 +125,10 @@ WLEDTarget targets[] = {
   {{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02}, "Kitchen"}
 };
 
-// Map buttons to targets with a bitmask (bit 0 = targets[0], bit 1 = targets[1], etc.)
-uint8_t buttonTargetMask[NUM_BUTTONS] = {
-  (1 << 0) | (1 << 1), // ON/OFF -> both targets
-  (1 << 1),            // Preset 1 -> Kitchen only
+// Map buttons to targets (true = send to that target)
+bool buttonTargets[NUM_BUTTONS][NUM_TARGETS] = {
+  {true, false}, // ON/OFF
+  {true, true},  // Preset 1
   // ...
 };
 
@@ -137,8 +137,8 @@ uint8_t buttonTargetMask[NUM_BUTTONS] = {
 
 ### Configure Multiple WLED Targets (Multi-Button)
 - Add each WLED's MAC and a friendly name to the `targets[]` array (up to 4 entries).
-- For every button entry in `buttonTargetMask`, set a bit for each target index that should receive the press (bit 0 = first target, bit 1 = second, etc.).
-- Example: to have Preset 1 control only the Kitchen strip, set its mask to `(1 << 1)`.
+- For every button row in `buttonTargets`, set `true` for each target that should receive the button press.
+- Example: to have Preset 1 control only the Kitchen strip, set its row to `{false, true}`.
 
 ---
 

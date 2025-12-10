@@ -75,36 +75,32 @@ struct WLEDTarget {
 };
 
 WLEDTarget targets[] = {
-  {{0x30, 0xC6, 0xF7, 0x1F, 0xD2, 0xD0}, "Living Room"},
-  {{0x24, 0x6F, 0x28, 0xAA, 0xBB, 0xCC}, "Kitchen"},
-  {{0x24, 0x6F, 0x28, 0xDD, 0xEE, 0xFF}, "Desk"}
+  {{0x30, 0xC6, 0xF7, 0x27, 0x58, 0x60}, "Stage-Left"},
+  {{0x30, 0xC6, 0xF7, 0x1F, 0xD2, 0xD0}, "Stage-Right"}
 };
 
 const int NUM_TARGETS = sizeof(targets) / sizeof(targets[0]);
 
-// Map each button to one or more WLED targets using a bitmask so changing the
-// number of targets won't cause initializer size errors. Bit 0 controls
-// targets[0], bit 1 controls targets[1], etc. Only the lower NUM_TARGETS bits
-// are used when sending.
-static_assert(NUM_TARGETS <= 8, "Up to 8 WLED targets are supported");
-
-uint8_t buttonTargetMask[NUM_BUTTONS] = {
-  // ON/OFF      Living Room | Kitchen
-  (1 << 0) | (1 << 1),
-  // Preset 1    Living Room | Desk
-  (1 << 0) | (1 << 2),
-  // Preset 2    Kitchen     | Desk
-  (1 << 1) | (1 << 2),
-  // Preset 3    All
-  (1 << 0) | (1 << 1) | (1 << 2),
-  // Preset 4    Living Room only
-  (1 << 0),
-  // Bright Up   All
-  (1 << 0) | (1 << 1) | (1 << 2),
-  // Bright Down All
-  (1 << 0) | (1 << 1) | (1 << 2),
-  // Night Mode  Living Room | Kitchen
-  (1 << 0) | (1 << 1)
+// Map each button to one or more WLED targets. Set an entry to true to send
+// the button's command to that target. This lets a single button control
+// multiple instances.
+bool buttonTargets[NUM_BUTTONS][NUM_TARGETS] = {
+  // ON/OFF      Living Room, Kitchen, Desk
+  {true,        true,        false},
+  // Preset 1
+  {true,        false,       true},
+  // Preset 2
+  {false,       true,        true},
+  // Preset 3
+  {true,        true,        true},
+  // Preset 4
+  {true,        false,       false},
+  // Bright Up
+  {true,        true,        true},
+  // Bright Down
+  {true,        true,        true},
+  // Night Mode
+  {true,        true,        false}
 };
 
 int retriesCount = 0;
@@ -340,16 +336,15 @@ void setup(){
 
     // Send the message to all configured targets
     bool sentToAny = false;
-    uint8_t targetMask = buttonTargetMask[buttonIndex];
     for (int i = 0; i < NUM_TARGETS; i++) {
-      if (targetMask & (1 << i)) {
+      if (buttonTargets[buttonIndex][i]) {
         sendMessage(commandToSend, i);
         sentToAny = true;
       }
     }
 
     if (!sentToAny) {
-      Serial.println("No targets configured for this button. Update buttonTargetMask.");
+      Serial.println("No targets configured for this button. Update buttonTargets matrix.");
     }
 
     // Store which button was pressed
@@ -431,16 +426,15 @@ void loop(){
 
       // Send the message to all configured targets
       bool sentToAny = false;
-      uint8_t targetMask = buttonTargetMask[buttonIndex];
       for (int i = 0; i < NUM_TARGETS; i++) {
-        if (targetMask & (1 << i)) {
+        if (buttonTargets[buttonIndex][i]) {
           sendMessage(commandToSend, i);
           sentToAny = true;
         }
       }
 
       if (!sentToAny) {
-        Serial.println("No targets configured for this button. Update buttonTargetMask.");
+        Serial.println("No targets configured for this button. Update buttonTargets matrix.");
       }
 
       // Wait for button release
