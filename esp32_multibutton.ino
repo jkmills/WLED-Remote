@@ -4,8 +4,12 @@
 #include <Arduino.h>
 
 #define MAX_RETRIES 25
-#define DEBOUNCE_DELAY 50  // Button debounce time in milliseconds
 #define DEBUG_MODE true    // Set to false to enable deep sleep
+
+// Multi-press timing
+const unsigned long MULTI_DEBOUNCE_MS   = 30;
+const unsigned long MULTI_DOUBLE_MS     = 400;
+const unsigned long MULTI_LONG_PRESS_MS = 800;
 
 // Modify with the WLED wifi channel
 #define CHANNEL 1
@@ -14,12 +18,12 @@
 // IMPORTANT: Only RTC GPIO pins can wake from deep sleep!
 // RTC GPIO pins: 0, 2, 4, 12, 13, 14, 15, 25, 26, 27, 32, 33
 #define BTN_ON_OFF    4   // GPIO4  - ON/OFF toggle
-#define BTN_PRESET1   15  // GPIO15 - Preset 1
-#define BTN_PRESET2   13  // GPIO13 - Preset 2
-#define BTN_PRESET3   12  // GPIO12 - Preset 3
-#define BTN_PRESET4   14  // GPIO14 - Preset 4
-#define BTN_BRIGHT_UP 27  // GPIO27 - Brightness Up
-#define BTN_BRIGHT_DN 26  // GPIO26 - Brightness Down
+#define BTN_ACTION1   15  // GPIO15 - Action 1 (was Preset 1 / Blue)
+#define BTN_ACTION2   13  // GPIO13 - Action 2 (was Preset 2 / Green)
+#define BTN_ACTION3   12  // GPIO12 - Action 3 (was Preset 3 / Yellow)
+#define BTN_ACTION4   14  // GPIO14 - Action 4 (was Preset 4 / Red)
+#define BTN_ACTION5   27  // GPIO27 - Action 5 (was Bright Up / White)
+#define BTN_ACTION6   26  // GPIO26 - Action 6 (was Bright Down / Black)
 #define BTN_NIGHT     25  // GPIO25 - Night Mode
 
 #define LED_BUILTIN 2     // Built-in LED on GPIO2 for DEVKIT V1
@@ -32,8 +36,19 @@
 #define PRESET_TWO 17
 #define PRESET_THREE 18
 #define PRESET_FOUR 19
+#define PRESET_FIVE 20
+#define PRESET_SIX 21
+#define PRESET_SEVEN 22
+#define PRESET_EIGHT 23
+#define PRESET_NINE 24
+#define PRESET_TEN 25
+#define PRESET_ELEVEN 26
+#define PRESET_TWELVE 27
+#define PRESET_98 98
+#define PRESET_99 99
 #define BRIGHT_UP 9
 #define BRIGHT_DOWN 8
+#define NO_CMD 0xFF  // Sentinel for "no alternate command"
 
 // Button configuration structure
 struct ButtonConfig {
@@ -43,16 +58,39 @@ struct ButtonConfig {
   bool needsState;  // true if button requires state tracking (like ON/OFF)
 };
 
-// Define all buttons and their WLED commands
+// Define all buttons and their primary WLED commands
 ButtonConfig buttons[] = {
   {BTN_ON_OFF,    0,            "ON/OFF",       true},   // Command set dynamically based on state
-  {BTN_PRESET1,   PRESET_ONE,   "Preset 1",     false},
-  {BTN_PRESET2,   PRESET_TWO,   "Preset 2",     false},
-  {BTN_PRESET3,   PRESET_THREE, "Preset 3",     false},
-  {BTN_PRESET4,   PRESET_FOUR,  "Preset 4",     false},
-  {BTN_BRIGHT_UP, BRIGHT_UP,    "Bright Up",    false},
-  {BTN_BRIGHT_DN, BRIGHT_DOWN,  "Bright Down",  false},
+  {BTN_ACTION1,   PRESET_ONE,   "Action 1",     false},  // e.g., Blue
+  {BTN_ACTION2,   PRESET_TWO,   "Action 2",     false},  // e.g., Green
+  {BTN_ACTION3,   PRESET_THREE, "Action 3",     false},  // e.g., Yellow
+  {BTN_ACTION4,   PRESET_FOUR,  "Action 4",     false},  // e.g., Red
+  {BTN_ACTION5,   PRESET_98,    "Action 5",     false},  // e.g., White
+  {BTN_ACTION6,   PRESET_99,    "Action 6",     false},  // e.g., Black
   {BTN_NIGHT,     NIGHT,        "Night Mode",   false}
+};
+
+// Optional alternate commands for double / long presses (NO_CMD to disable)
+uint8_t doubleCommands[] = {
+  NO_CMD,     // ON/OFF double
+  PRESET_FIVE,   // Action 1 double -> Preset 5
+  PRESET_SIX,    // Action 2 double -> Preset 6
+  PRESET_SEVEN,  // Action 3 double -> Preset 7
+  PRESET_EIGHT,  // Action 4 double -> Preset 8
+  NO_CMD,     // Action 5 double
+  NO_CMD,     // Action 6 double
+  NO_CMD      // Night Mode double
+};
+
+uint8_t longCommands[] = {
+  NO_CMD,     // ON/OFF long
+  NO_CMD,     // Action 1 long
+  NO_CMD,     // Action 2 long
+  NO_CMD,     // Action 3 long
+  NO_CMD,     // Action 4 long
+  NO_CMD,     // Action 5 long
+  NO_CMD,     // Action 6 long
+  NO_CMD      // Night Mode long
 };
 
 const int NUM_BUTTONS = sizeof(buttons) / sizeof(buttons[0]);
@@ -66,9 +104,7 @@ RTC_DATA_ATTR uint32_t seq = 1;
 // Store which button was pressed - stored in RTC memory
 RTC_DATA_ATTR uint8_t lastButtonPressed = 255;
 
-// Configure up to 4 WLED targets. Add or remove entries to match your setup.
-// Example shows 3 targets: Living Room, Kitchen, and Desk. Replace the MAC
-// addresses and names with your own WLED devices.
+// Explicit peers for reliability (Stage-Left, Stage-Right). Update to match your WLED devices.
 struct WLEDTarget {
   uint8_t mac[6];
   const char* name;
@@ -81,32 +117,30 @@ WLEDTarget targets[] = {
 
 const int NUM_TARGETS = sizeof(targets) / sizeof(targets[0]);
 
-// Map each button to one or more WLED targets. Set an entry to true to send
-// the button's command to that target. This lets a single button control
-// multiple instances.
-bool buttonTargets[NUM_BUTTONS][NUM_TARGETS] = {
-  // ON/OFF      Living Room, Kitchen, Desk
-  {true,        true,        false},
-  // Preset 1
-  {true,        false,       true},
-  // Preset 2
-  {false,       true,        true},
-  // Preset 3
-  {true,        true,        true},
-  // Preset 4
-  {true,        false,       false},
-  // Bright Up
-  {true,        true,        true},
-  // Bright Down
-  {true,        true,        true},
-  // Night Mode
-  {true,        true,        false}
-};
-
 int retriesCount = 0;
 
 esp_now_peer_info_t peerInfo;
 uint8_t activeTargetMac[6] = {0};
+
+// Multi-press tracking
+enum PressType { PRESS_NONE, PRESS_SINGLE, PRESS_DOUBLE, PRESS_LONG };
+
+struct ButtonState {
+  bool lastReading = HIGH;
+  bool stableState = HIGH;
+  unsigned long lastDebounce = 0;
+  unsigned long pressStart = 0;
+  unsigned long lastRelease = 0;
+  uint8_t clickCount = 0;
+  bool longReported = false;
+};
+
+ButtonState buttonStates[NUM_BUTTONS];
+
+struct PressEvent {
+  int buttonIndex = -1;
+  PressType type = PRESS_NONE;
+};
 
 // Message structure from wled00/remote.cpp
 typedef struct message_structure {
@@ -124,6 +158,11 @@ typedef struct message_structure {
 } message_structure;
 
 message_structure message;
+
+// Forward declarations
+struct PressEvent;
+void handlePressEvent(const PressEvent &evt);
+bool pollButtonEvent(PressEvent &evt);
 
 // Callback on data sent. If the message delivery fails, retry until success or MAX_RETRIES
 // Updated signature for newer ESP32 Arduino core (v3.x with IDF 5.x)
@@ -146,7 +185,7 @@ void sentStatusAndRetries(const wifi_tx_info_t *info, esp_now_send_status_t stat
   retriesCount = 0;
 }
 
-void sendMessage(int button, int targetIndex) {
+void sendMessage(int button) {
   // Increase seq number
   seq += 1;
 
@@ -160,49 +199,134 @@ void sendMessage(int button, int targetIndex) {
   Serial.print(seq);
   Serial.print(" | Command: ");
   Serial.println(button);
-  Serial.print("Target: ");
-  Serial.println(targets[targetIndex].name);
-
   message.button = button;
 
-  memcpy(activeTargetMac, targets[targetIndex].mac, 6);
-  esp_err_t result = esp_now_send(activeTargetMac, (uint8_t *)&message, sizeof(message));
+  for (int i = 0; i < NUM_TARGETS; i++) {
+    memcpy(activeTargetMac, targets[i].mac, 6);
+    Serial.print("Target: ");
+    Serial.println(targets[i].name);
 
-  // Display the error
-  switch (result) {
-    case ESP_OK:
-      Serial.println("Message queued successfully");
-      break;
+    esp_err_t result = esp_now_send(activeTargetMac, (uint8_t *)&message, sizeof(message));
 
-    case ESP_ERR_ESPNOW_NOT_INIT:
-      Serial.println("ESP-NOW not initialized");
-      break;
+    // Display the error
+    switch (result) {
+      case ESP_OK:
+        Serial.println("Message queued successfully");
+        break;
 
-    case ESP_ERR_ESPNOW_ARG:
-      Serial.println("Invalid argument");
-      break;
+      case ESP_ERR_ESPNOW_NOT_INIT:
+        Serial.println("ESP-NOW not initialized");
+        break;
 
-    case ESP_ERR_ESPNOW_INTERNAL:
-      Serial.println("Internal error");
-      break;
+      case ESP_ERR_ESPNOW_ARG:
+        Serial.println("Invalid argument");
+        break;
 
-    case ESP_ERR_ESPNOW_NO_MEM:
-      Serial.println("Out of memory");
-      break;
+      case ESP_ERR_ESPNOW_INTERNAL:
+        Serial.println("Internal error");
+        break;
 
-    case ESP_ERR_ESPNOW_NOT_FOUND:
-      Serial.println("Peer not found");
-      break;
+      case ESP_ERR_ESPNOW_NO_MEM:
+        Serial.println("Out of memory");
+        break;
 
-    case ESP_ERR_ESPNOW_IF:
-      Serial.println("Interface error");
-      break;
+      case ESP_ERR_ESPNOW_NOT_FOUND:
+        Serial.println("Peer not found");
+        break;
 
-    default:
-      Serial.print("Unknown error code: ");
-      Serial.println(result);
-      break;
+      case ESP_ERR_ESPNOW_IF:
+        Serial.println("Interface error");
+        break;
+
+      default:
+        Serial.print("Unknown error code: ");
+        Serial.println(result);
+        break;
+    }
   }
+}
+
+const char* pressTypeName(PressType t) {
+  switch (t) {
+    case PRESS_SINGLE: return "SINGLE";
+    case PRESS_DOUBLE: return "DOUBLE";
+    case PRESS_LONG:   return "LONG";
+    default:           return "NONE";
+  }
+}
+
+uint8_t resolveCommandForPress(int buttonIndex, PressType type) {
+  if (type == PRESS_SINGLE) {
+    if (buttons[buttonIndex].needsState) {
+      if (is_lightOn) {
+        is_lightOn = false;
+        digitalWrite(LED_BUILTIN, LOW);
+        return OFF;
+      } else {
+        is_lightOn = true;
+        digitalWrite(LED_BUILTIN, HIGH);
+        return ON;
+      }
+    }
+    return buttons[buttonIndex].command;
+  }
+
+  if (type == PRESS_DOUBLE) {
+    if (doubleCommands[buttonIndex] != NO_CMD) {
+      return doubleCommands[buttonIndex];
+    }
+    // Fallback: behave like single
+    return resolveCommandForPress(buttonIndex, PRESS_SINGLE);
+  }
+
+  if (type == PRESS_LONG) {
+    if (longCommands[buttonIndex] != NO_CMD) {
+      return longCommands[buttonIndex];
+    }
+    // Fallback: behave like single
+    return resolveCommandForPress(buttonIndex, PRESS_SINGLE);
+  }
+
+  return NO_CMD;
+}
+
+void handlePressEvent(const PressEvent &evt) {
+  if (evt.buttonIndex < 0 || evt.buttonIndex >= NUM_BUTTONS) return;
+
+  uint8_t commandToSend = resolveCommandForPress(evt.buttonIndex, evt.type);
+
+  Serial.print("\nButton Pressed: ");
+  Serial.print(buttons[evt.buttonIndex].name);
+  Serial.print(" | Type: ");
+  Serial.println(pressTypeName(evt.type));
+
+  if (commandToSend == NO_CMD) {
+    Serial.println("No command configured for this press type.");
+    return;
+  }
+
+  // Non-stateful feedback: blink LED (single=2 blinks, double=3, long=hold)
+  if (!buttons[evt.buttonIndex].needsState) {
+    if (evt.type == PRESS_LONG) {
+      digitalWrite(LED_BUILTIN, HIGH);
+      delay(200);
+      digitalWrite(LED_BUILTIN, LOW);
+    } else {
+      int blinks = (evt.type == PRESS_DOUBLE) ? 3 : 2;
+      for (int i = 0; i < blinks; i++) {
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(50);
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(50);
+      }
+    }
+  }
+
+  Serial.print("Sending command: ");
+  Serial.println(commandToSend);
+
+  sendMessage(commandToSend);
+  lastButtonPressed = evt.buttonIndex;
 }
 
 void addPeers() {
@@ -222,17 +346,59 @@ void addPeers() {
   }
 }
 
-// Check which button was pressed
-int getButtonPressed() {
+bool pollButtonEvent(PressEvent &evt) {
+  unsigned long now = millis();
   for (int i = 0; i < NUM_BUTTONS; i++) {
-    if (digitalRead(buttons[i].pin) == LOW) {  // Button pressed (active LOW with pull-up)
-      delay(DEBOUNCE_DELAY);  // Debounce
-      if (digitalRead(buttons[i].pin) == LOW) {  // Confirm still pressed
-        return i;  // Return button index
+    ButtonState &st = buttonStates[i];
+    int reading = digitalRead(buttons[i].pin);
+
+    if (reading != st.lastReading) {
+      st.lastDebounce = now;
+      st.lastReading = reading;
+    }
+
+    if ((now - st.lastDebounce) > MULTI_DEBOUNCE_MS && reading != st.stableState) {
+      st.stableState = reading;
+
+      if (st.stableState == LOW) {  // Pressed
+        st.pressStart = now;
+        st.longReported = false;
+      } else {  // Released
+        unsigned long pressDuration = now - st.pressStart;
+        (void)pressDuration;  // duration is inferred by longReported or timing below
+        if (!st.longReported) {
+          st.clickCount++;
+          st.lastRelease = now;
+        } else {
+          st.clickCount = 0;  // Already handled long
+        }
       }
     }
+
+    // Long press detection while held
+    if (!st.longReported && st.stableState == LOW && (now - st.pressStart) >= MULTI_LONG_PRESS_MS) {
+      evt.buttonIndex = i;
+      evt.type = PRESS_LONG;
+      st.longReported = true;
+      st.clickCount = 0;
+      return true;
+    }
+
+    // Single / double determination after release
+    if (st.clickCount == 1 && (now - st.lastRelease) > MULTI_DOUBLE_MS) {
+      evt.buttonIndex = i;
+      evt.type = PRESS_SINGLE;
+      st.clickCount = 0;
+      return true;
+    } else if (st.clickCount >= 2) {
+      evt.buttonIndex = i;
+      evt.type = PRESS_DOUBLE;
+      st.clickCount = 0;
+      return true;
+    }
   }
-  return -1;  // No button pressed
+
+  return false;
 }
 
 void setup(){
@@ -287,76 +453,17 @@ void setup(){
   // Press any button during this time to proceed
   Serial.println("Press any button within 10 seconds to test...");
   unsigned long startTime = millis();
-  int buttonIndex = -1;
+  PressEvent evt;
 
   while (millis() - startTime < 10000) {
-    buttonIndex = getButtonPressed();
-    if (buttonIndex >= 0) break;
-    delay(100);
+    if (pollButtonEvent(evt)) break;
+    delay(5);
   }
 
-  // Check which button woke us up or is currently pressed
-  if (buttonIndex < 0) {
-    buttonIndex = getButtonPressed();
-  }
-
-  if (buttonIndex >= 0) {
-    Serial.print("\nButton Pressed: ");
-    Serial.println(buttons[buttonIndex].name);
-
-    uint8_t commandToSend;
-
-    // Handle ON/OFF button specially (needs state tracking)
-    if (buttons[buttonIndex].needsState) {
-      if (is_lightOn) {
-        commandToSend = OFF;
-        is_lightOn = false;
-        Serial.println("Sending: Light OFF");
-        digitalWrite(LED_BUILTIN, LOW);
-      } else {
-        commandToSend = ON;
-        is_lightOn = true;
-        Serial.println("Sending: Light ON");
-        digitalWrite(LED_BUILTIN, HIGH);
-      }
-    } else {
-      // All other buttons send their configured command
-      commandToSend = buttons[buttonIndex].command;
-      Serial.print("Sending command: ");
-      Serial.println(commandToSend);
-
-      // Blink LED to indicate button press
-      for (int i = 0; i < 2; i++) {
-        digitalWrite(LED_BUILTIN, HIGH);
-        delay(50);
-        digitalWrite(LED_BUILTIN, LOW);
-        delay(50);
-      }
-    }
-
-    // Send the message to all configured targets
-    bool sentToAny = false;
-    for (int i = 0; i < NUM_TARGETS; i++) {
-      if (buttonTargets[buttonIndex][i]) {
-        sendMessage(commandToSend, i);
-        sentToAny = true;
-      }
-    }
-
-    if (!sentToAny) {
-      Serial.println("No targets configured for this button. Update buttonTargets matrix.");
-    }
-
-    // Store which button was pressed
-    lastButtonPressed = buttonIndex;
-
-    // Wait for button release
-    while (digitalRead(buttons[buttonIndex].pin) == LOW) {
-      delay(10);
-    }
-    Serial.println("Button released");
+  if (evt.type != PRESS_NONE) {
+    handlePressEvent(evt);
   } else {
-    Serial.println("No button detected - this shouldn't happen!");
+    Serial.println("No button detected during startup window.");
   }
 
   // Delay to complete the sending
@@ -387,63 +494,12 @@ void setup(){
 
 void loop(){
   if (DEBUG_MODE) {
-    // In debug mode, continuously check for button presses
-    int buttonIndex = getButtonPressed();
-
-    if (buttonIndex >= 0) {
-      Serial.print("Button Pressed: ");
-      Serial.println(buttons[buttonIndex].name);
-
-      uint8_t commandToSend;
-
-      // Handle ON/OFF button specially (needs state tracking)
-      if (buttons[buttonIndex].needsState) {
-        if (is_lightOn) {
-          commandToSend = OFF;
-          is_lightOn = false;
-          Serial.println("Sending: Light OFF");
-          digitalWrite(LED_BUILTIN, LOW);
-        } else {
-          commandToSend = ON;
-          is_lightOn = true;
-          Serial.println("Sending: Light ON");
-          digitalWrite(LED_BUILTIN, HIGH);
-        }
-      } else {
-        // All other buttons send their configured command
-        commandToSend = buttons[buttonIndex].command;
-        Serial.print("Sending command: ");
-        Serial.println(commandToSend);
-
-        // Blink LED to indicate button press
-        for (int i = 0; i < 2; i++) {
-          digitalWrite(LED_BUILTIN, HIGH);
-          delay(50);
-          digitalWrite(LED_BUILTIN, LOW);
-          delay(50);
-        }
-      }
-
-      // Send the message to all configured targets
-      bool sentToAny = false;
-      for (int i = 0; i < NUM_TARGETS; i++) {
-        if (buttonTargets[buttonIndex][i]) {
-          sendMessage(commandToSend, i);
-          sentToAny = true;
-        }
-      }
-
-      if (!sentToAny) {
-        Serial.println("No targets configured for this button. Update buttonTargets matrix.");
-      }
-
-      // Wait for button release
-      while (digitalRead(buttons[buttonIndex].pin) == LOW) {
-        delay(10);
-      }
+    // In debug mode, continuously check for button presses (single, double, long)
+    PressEvent evt;
+    if (pollButtonEvent(evt)) {
+      handlePressEvent(evt);
       Serial.println("Button released\n");
-
-      delay(100);  // Debounce
+      delay(100);  // Debounce after handling
     }
 
     delay(50);  // Small delay to prevent excessive CPU usage
